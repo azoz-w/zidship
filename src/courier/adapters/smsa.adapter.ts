@@ -1,176 +1,133 @@
-import {
-  Injectable,
-  Logger,
-  BadRequestException,
-  InternalServerErrorException,
-} from '@nestjs/common';
-import { HttpService } from '@nestjs/axios';
-import { ConfigService } from '@nestjs/config';
-import { firstValueFrom } from 'rxjs';
+import { Injectable, Logger } from '@nestjs/common';
 import { ICourierAdapter } from '../interface/courier.interface';
+import { ShipmentStatus } from 'src/generated/prisma/enums';
 import {
   CreateWaybillReqDto,
   CreateWaybillResDto,
   TrackingResDto,
 } from '../dto';
-import { ShipmentStatus } from 'src/generated/prisma/enums';
+import { Retryable } from 'src/common/decorators/retryable.decorator';
 
 @Injectable()
-export class SmsaAdapter implements ICourierAdapter {
-  private readonly logger = new Logger(SmsaAdapter.name);
-  private readonly apiUrl: string;
-  private readonly apiKey: string;
+export class MockSmsaAdapter implements ICourierAdapter {
+  private readonly logger = new Logger(MockSmsaAdapter.name);
 
-  constructor(
-    private readonly httpService: HttpService,
-    private readonly configService: ConfigService,
-  ) {
-    const apiKey = this.configService.get<string>('SMSA_API_KEY');
-    const apiUrl = this.configService.get<string>('SMSA_API_URL');
-    if (!apiKey) {
-      throw new Error(
-        'SMSA_API_KEY is not defined in the environment variables',
-      );
-    }
-    if (!apiUrl) {
-      throw new Error(
-        'SMSA_API_URL is not defined in the environment variables',
-      );
-    }
-    this.apiUrl = apiUrl;
-    this.apiKey = apiKey;
-  }
-
+  //Unique ID for this provider
   readonly providerId = 'smsa';
 
+  //adapter supports
   readonly capabilities = {
     cancellation: true,
     printLabel: true,
   };
 
   /**
-   * REAL HTTP Call to create a shipment
-   */
-  async createWaybill(
-    input: CreateWaybillReqDto,
-  ): Promise<CreateWaybillResDto> {
-    this.logger.log(
-      `[SMSA] Creating waybill for Order ${input.orderReference}`,
-    );
-
-    // 1. Map Our DTO to SMSA Specific JSON Payload
-    const payload = {
-      refNo: input.orderReference,
-      sName: input.sender.name,
-      sPhone: input.sender.phone,
-      sAddress: input.sender.address,
-      sCity: input.sender.city,
-      sCntry: input.sender.countryCode,
-      rName: input.receiver.name,
-      rPhone: input.receiver.phone,
-      rAddress: input.receiver.address,
-      rCity: input.receiver.city,
-      rCntry: input.receiver.countryCode,
-      weight: input.dimensions.weight,
-    };
-
-    try {
-      // 2. Execute the HTTP POST request
-      const response = await firstValueFrom(
-        this.httpService.post(`${this.apiUrl}/create-shipment`, payload, {
-          headers: { apikey: this.apiKey },
-        }),
-      );
-
-      const data = response.data;
-
-      // 3. Handle Provider-Specific Errors
-      if (data.error) {
-        throw new BadRequestException(`SMSA Error: ${data.message}`);
-      }
-
-      // 4. Return Normalized Result
-      return {
-        trackingNumber: data.awbNo,
-        courierRef: data.refNo,
-        labelUrl: data.labelUrl, // e.g. "https://smsa.com/pdf/123"
-        rawResponse: data, // Save this to DB for audit
-      };
-    } catch (error) {
-      this.logger.error(
-        `[SMSA] Failed to create waybill`,
-        error.response?.data,
-      );
-      // Re-throw so our Retry Mechanism (Queue) catches it!
-      throw new InternalServerErrorException(
-        'SMSA API is unreachable or returned error',
-      );
-    }
-  }
-
-  /**
-   * REAL HTTP Call to get status
-   */
-  async trackShipment(trackingNumber: string): Promise<TrackingResDto> {
-    try {
-      const response = await firstValueFrom(
-        this.httpService.get(`${this.apiUrl}/tracking/${trackingNumber}`, {
-          headers: { apikey: this.apiKey },
-        }),
-      );
-
-      const history = response.data.updates.map((event) => ({
-        status: this.mapStatus(event.activity), // Map "Received" -> "CREATED"
-        rawStatus: event.activity,
-        description: event.details,
-        eventDate: new Date(event.date),
-      }));
-
-      return {
-        trackingNumber,
-        currentStatus: history[history.length - 1].status,
-        events: history,
-      };
-    } catch (error) {
-      this.logger.error(`[SMSA] Tracking failed`, error);
-      throw error;
-    }
-  }
-
-  async getLabel(trackingNumber: string): Promise<string> {
-    // Some providers return a URL, others return a Base64 string
-    // Here we assume they return a direct public URL
-    return `${this.apiUrl}/print/${trackingNumber}`;
-  }
-
-  async cancelShipment(trackingNumber: string): Promise<boolean> {
-    try {
-      await firstValueFrom(
-        this.httpService.post(
-          `${this.apiUrl}/cancel/${trackingNumber}`,
-          {},
-          {
-            headers: { apikey: this.apiKey },
-          },
-        ),
-      );
-      return true;
-    } catch (error) {
-      return false;
-    }
-  }
-
-  /**
-   * The Critical Logic: Translating SMSA statuses to ZidShip statuses
+   * Status Mapping: This is where we translate "SMSA Language" to "ZidShip Language"
    *
    */
   mapStatus(rawStatus: string): ShipmentStatus {
-    const status = rawStatus.toUpperCase();
-    if (status.includes('RECEIVED')) return ShipmentStatus.CREATED;
-    if (status.includes('WITH COURIER')) return ShipmentStatus.PICKED_UP;
-    if (status.includes('OUT FOR DELIVERY'))
-      return ShipmentStatus.OUT_FOR_DELIVERY;
-    if (status.includes('DELIVERED')) return ShipmentStatus.DELIVERED;
-    return ShipmentStatus.PENDING;
+    const normalized = rawStatus.toUpperCase().trim();
+    switch (normalized) {
+      case 'DATA_RECEIVED':
+        return ShipmentStatus.CREATED;
+      case 'WITH_COURIER':
+        return ShipmentStatus.PICKED_UP;
+      case 'OUT_FOR_DELIVERY':
+        return ShipmentStatus.OUT_FOR_DELIVERY;
+      case 'DELIVERED_TO_CUSTOMER':
+        return ShipmentStatus.DELIVERED;
+      case 'CANCELED':
+        return ShipmentStatus.CANCELLED;
+      default:
+        return ShipmentStatus.PENDING;
+    }
+  }
+
+  /**
+   * Core: Create Waybill
+   * Simulates an HTTP POST to SMSA API
+   */
+  @Retryable({ retries: 3, delayMs: 200 })
+  async createWaybill(
+    input: CreateWaybillReqDto,
+  ): Promise<CreateWaybillResDto> {
+    this.logger.log(`Creating waybill for Order ${input.orderReference}...`);
+
+    // Simulate API Latency (e.g., 500ms)
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    // Fake Response from "External API"
+    const fakeTrackingNumber = '2900' + Math.floor(Math.random() * 10000000);
+    const fakeReference = 'SMSA-REF-' + Math.floor(Math.random() * 1000);
+
+    return {
+      trackingNumber: fakeTrackingNumber,
+      courierRef: fakeReference,
+      labelUrl: `https://track.smsa.sa/print/${fakeTrackingNumber}`,
+      rawResponse: {
+        // We always store the raw response for debugging
+        status: 'success',
+        message: 'Waybill created successfully',
+        awb: fakeTrackingNumber,
+        ref_id: fakeReference,
+      },
+    };
+  }
+
+  /**
+   * Core: Track Shipment
+   * Returns a history of events mapped to our Unified Enum
+   */
+  @Retryable({ retries: 3, delayMs: 200 })
+  async trackShipment(trackingNumber: string): Promise<TrackingResDto> {
+    this.logger.log(`Tracking shipment ${trackingNumber}...`);
+
+    // Simulate API Latency
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // Mock Raw Data from SMSA
+    const rawEvents = [
+      {
+        status: 'DATA_RECEIVED',
+        time: '2023-10-01T10:00:00Z',
+        location: 'Riyadh Hub',
+      },
+      {
+        status: 'WITH_COURIER',
+        time: '2023-10-01T14:00:00Z',
+        location: 'Riyadh Hub',
+      },
+      {
+        status: 'OUT_FOR_DELIVERY',
+        time: '2023-10-02T09:00:00Z',
+        location: 'Jeddah',
+      },
+    ];
+
+    // Map to Unified Format
+    const history = rawEvents.map((event) => ({
+      status: this.mapStatus(event.status), // <--- The Magic Happens Here
+      rawStatus: event.status,
+      description: `Status changed to ${event.status} at ${event.location}`,
+      eventDate: new Date(event.time),
+    }));
+
+    return {
+      trackingNumber,
+      currentStatus: history[history.length - 1].status,
+      events: history,
+    };
+  }
+
+  @Retryable({ retries: 3, delayMs: 200 })
+  async getLabel(trackingNumber: string): Promise<string> {
+    return `https://demo.smsa.com/labels/${trackingNumber}.pdf`;
+  }
+
+  @Retryable({ retries: 3, delayMs: 200 })
+  async cancelShipment(trackingNumber: string): Promise<boolean> {
+    this.logger.log(`Cancelling shipment ${trackingNumber}`);
+    setTimeout(() => {}, 200); // Simulate latency
+    return true; // Simulate success
   }
 }

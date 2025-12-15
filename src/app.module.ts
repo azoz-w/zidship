@@ -5,6 +5,7 @@ import { CourierModule } from './courier/courier.module';
 import { ShipmentModule } from './shipment/shipment.module';
 import { ConfigModule } from '@nestjs/config';
 import { PrismaModule } from './prisma/prisma.module';
+import { CommonModule } from './common/common.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { PrismaModule } from './prisma/prisma.module';
     CourierModule,
     ShipmentModule,
     PrismaModule,
+    CommonModule,
   ],
   controllers: [AppController],
   providers: [AppService],

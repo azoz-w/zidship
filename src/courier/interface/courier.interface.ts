@@ -4,7 +4,7 @@ import {
   CreateWaybillReqDto,
   CreateWaybillResDto,
 } from '../dto';
-// --- The Core Strategy Interface ---
+
 export interface ICourierAdapter {
   readonly providerId: string; // e.g., 'smsa', 'aramex'
 

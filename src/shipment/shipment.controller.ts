@@ -18,12 +18,12 @@ export class ShipmentController {
 
   @Post()
   async create(@Body() body: { courierId: string; data: CreateWaybillReqDto }) {
-    return this.shipmentService.createShipment(body.courierId, body.data);
+    return await this.shipmentService.createShipment(body.courierId, body.data);
   }
 
   @Get(':trackingNumber/track')
   async track(@Param('trackingNumber') trackingNumber: string) {
-    return this.shipmentService.trackShipment(trackingNumber);
+    return await this.shipmentService.trackShipment(trackingNumber);
   }
 
   @Get(':trackingNumber/label')
