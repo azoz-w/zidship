@@ -1,98 +1,89 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# ZidShip Architecture Documentation
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+## Overview
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+This document describes the architectural design of the ZidShip courier integration framework. The system is designed to provide a unified interface for managing shipments across multiple courier providers (e.g., SMSA, Aramex) while keeping the core business logic decoupled from provider-specific implementations.
 
-## Description
+## Design Goals
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+1.  **Extensibility**: Easily add new couriers without modifying the core system.
+2.  **Unified Interface**: Expose a single, consistent API for the rest of the ZidShip system.
+3.  **Resilience**: Handle network failures and external API flakiness gracefully.
+4.  **Observability**: Track shipment lifecycle events consistently.
 
-## Project setup
+## Core Components
 
-```bash
-$ npm install
-```
+### 1. Courier Integration Framework (Strategy & Adapter Patterns)
 
-## Compile and run the project
+The heart of the solution combines the **Strategy Pattern** with the **Adapter Pattern**:
 
-```bash
-# development
-$ npm run start
+*   **Strategy**: The system defines a family of algorithms (courier integrations), encapsulates each one, and makes them interchangeable. `CourierService` selects the appropriate strategy at runtime based on the `providerId`.
+*   **Adapter**: Each strategy implementation acts as an adapter, translating the unified `ICourierAdapter` interface calls into the specific API calls required by the third-party courier (e.g., SMSA, Aramex).
 
-# watch mode
-$ npm run start:dev
+*   **Interface (`ICourierAdapter`)**: Defines the contract that all couriers must adhere to.
+    *   `createWaybill`: Generates a label and tracking number.
+    *   `trackShipment`: Returns standardized status and history.
+    *   `mapStatus`: Converts specific courier statuses (e.g., "With Courier") to the system's unified `ShipmentStatus` enum.
+    *   `capabilities`: A feature flag object indicating if the courier supports optional features like `cancellation` or `printLabel`.
 
-# production mode
-$ npm run start:prod
-```
+*   **Registry (`CourierService`)**:
+    *   Acts as the factory and registry for adapters.
+    *   Injects all adapters using the `COURIER_ADAPTERS` token.
+    *   Provides `getAdapter(providerId)` to dynamically select the correct implementation at runtime.
 
-## Run tests
+### 2. Shipment Orchestration (`ShipmentService`)
 
-```bash
-# unit tests
-$ npm run test
+This service acts as the orchestration layer between the API/User and the Courier Framework.
 
-# e2e tests
-$ npm run test:e2e
+*   **Lifecycle Management**: Handles the DB transactions and state transitions.
+    1.  **Validation**: Checks if the courier exists and supports the requested operation.
+    2.  **Persistence**: Saves the shipment in `PENDING` state before calling the external API.
+    3.  **Execution**: Calls the selected Courier Adapter.
+    4.  **Completion**: Updates the DB with the tracking number and label URL, or marks as `FAILED` on error.
+*   **Abstraction**: The controller never talks to adapters directly; it only interacts with `ShipmentService`.
 
-# test coverage
-$ npm run test:cov
-```
+### 3. Resilience & Utilities
 
-## Deployment
+*   **Retry Mechanism (`@Retryable`)**:
+    *   A custom decorator using interceptor-like logic to automatically retry failed operations.
+    *   Configurable backoff strategies (delay, retries).
+    *   Essential for external HTTP integrations where transient network issues are common.
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+### 4. Data Layer (Prisma & PostgreSQL)
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+*   **Schema**:
+    *   `Shipment`: Stores core data (addresses, dimensions) and provider metadata (courierId, trackingNumber).
+    *   `ShipmentStatus` (Enum): A normalized list of statuses (CREATED, PICKED_UP, DELIVERED, etc.) that acts as the "Ubiquitous Language" of the domain.
+*   **JSON Fields**: `senderDetails` and `receiverDetails` are stored as JSON to allow flexibility if address formats change between regions without schema migrations.
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
+## Tradeoffs & Decisions
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+### Synchronous vs. Asynchronous Processing
+*   **Current Decision**: Operations like `createWaybill` are implemented **synchronously**.
+    *   *Pros*: Simpler implementation; immediate feedback to the client.
+    *   *Cons*: Latency is tied to the external provider. If SMSA takes 5 seconds, our API takes 5 seconds.
+*   **Future Improvement**: Move shipment creation to a **Message Queue** (e.g., BullMQ/Redis). The API would return "Accepted" immediately, and workers would handle the external API calls, updating the status via Webhooks.
 
-## Resources
+### Status Mapping
+*   **Challenge**: Every courier has different status codes/strings.
+*   **Solution**: The `mapStatus` method in every adapter allows us to normalize this data at the edge. The core system only ever sees `ShipmentStatus`.
+*   **Tradeoff**: Some granularity might be lost if a courier has very specific statuses that don't map cleanly to the standard enum.
 
-Check out a few resources that may come in handy when working with NestJS:
+### Dependency Injection Strategy
+*   **Decision**: We use a multi-provider injection token `COURIER_ADAPTERS` to inject an array of adapters into `CourierService`.
+*   **Why**: This avoids a giant `switch` statement or manual registration. To add a new courier, simply create the class, decorate it with `@Injectable`, and add it to the `providers` array in `CourierModule`.
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+## Adding a New Courier
 
-## Support
+1.  Create a new adapter class in `src/courier/adapters/` (e.g., `DhlAdapter`).
+2.  Implement `ICourierAdapter`.
+4.  Register the new class in `CourierModule`.
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+## API Documentation
 
-## Stay in touch
+The API follows RESTful conventions:
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+*   `POST /shipments`: Create a new shipment.
+*   `GET /shipments/:trackingNumber/track`: Get latest status and history.
+*   `GET /shipments/:trackingNumber/label`: Get the label url (idealy should be pdf buffer stream).
+*   `POST /shipments/:trackingNumber/cancel`: Cancel a shipment (if supported).
