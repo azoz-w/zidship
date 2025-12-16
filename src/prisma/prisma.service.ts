@@ -6,7 +6,6 @@ import {
 } from '@nestjs/common';
 import { Pool } from 'pg';
 import { PrismaPg } from '@prisma/adapter-pg';
-// Use your custom path if you generated it there, otherwise use '@prisma/client'
 import { PrismaClient } from 'src/generated/prisma/client';
 
 @Injectable()

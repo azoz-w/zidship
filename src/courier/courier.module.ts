@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { CourierController } from './courier.controller';
 import { CourierService } from './courier.service';
-import { MockSmsaAdapter } from './adapters/smsa.adapter';
+import { SmsaAdapter } from './adapters/smsa.adapter';
 import { HttpModule } from '@nestjs/axios';
 import { ConfigModule } from '@nestjs/config';
 import { AramexAdapter } from './adapters/aramex.adapter';
@@ -11,15 +11,15 @@ import { AramexAdapter } from './adapters/aramex.adapter';
   controllers: [CourierController],
   providers: [
     CourierService,
-    MockSmsaAdapter,
+    SmsaAdapter,
     AramexAdapter,
     {
       // 2. Create the provider array that CourierService injects
       provide: 'COURIER_ADAPTERS',
-      useFactory: (smsa: MockSmsaAdapter, aramex: AramexAdapter) => {
+      useFactory: (smsa: SmsaAdapter, aramex: AramexAdapter) => {
         return [smsa, aramex];
       },
-      inject: [MockSmsaAdapter, AramexAdapter],
+      inject: [SmsaAdapter, AramexAdapter],
     },
   ],
   exports: [CourierService],
